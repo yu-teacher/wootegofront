@@ -1,5 +1,4 @@
 <script>
-    import { onMount } from 'svelte';
     import { createEventDispatcher } from 'svelte';
     
     const dispatch = createEventDispatcher();
@@ -14,6 +13,8 @@
     export let myColor = null;
     export let blackPlayer = null;
     export let whitePlayer = null;
+    export let recommendedMove = null; // { x, y } 형태
+    export let myRole = null; // player1, player2, spectator 추가
     
     const BOARD_SIZE = 19;
     const CELL_SIZE = 30;
@@ -21,10 +22,22 @@
     const SVG_SIZE = CELL_SIZE * (BOARD_SIZE - 1) + PADDING * 2;
     
     let hoveredPosition = null;
-    let lastMove = null;
-    let recommendedMoves = [];
+    
+    // 로딩 상태
+    let loadingStart = false;
+    let loadingUndo = false;
+    let loadingRecommend = false;
+    let loadingAnalysis = false;
+    let loadingScore = false;
+    
+    // 내 차례인지 확인
+    $: isMyTurn = gameStarted && myColor && 
+                  ((currentTurn === 'black' && myColor === 'black') ||
+                   (currentTurn === 'white' && myColor === 'white'));
     
     function handleClick(event) {
+        if (!isMyTurn) return; // 내 차례 아니면 무시
+        
         const svg = event.currentTarget;
         const rect = svg.getBoundingClientRect();
         const x = event.clientX - rect.left;
@@ -41,6 +54,11 @@
     }
     
     function handleMouseMove(event) {
+        if (!isMyTurn) {
+            hoveredPosition = null; // 내 차례 아니면 호버 없음
+            return;
+        }
+        
         const svg = event.currentTarget;
         const rect = svg.getBoundingClientRect();
         const x = event.clientX - rect.left;
@@ -62,6 +80,37 @@
     
     function handleMouseLeave() {
         hoveredPosition = null;
+    }
+    
+    // 버튼 핸들러들 (로딩 상태 추가)
+    async function handleNewGame() {
+        loadingStart = true;
+        dispatch('newGame');
+        setTimeout(() => loadingStart = false, 1000);
+    }
+    
+    async function handleUndo() {
+        loadingUndo = true;
+        dispatch('undo');
+        setTimeout(() => loadingUndo = false, 1000);
+    }
+    
+    async function handleRecommend() {
+        loadingRecommend = true;
+        dispatch('recommend');
+        setTimeout(() => loadingRecommend = false, 2000);
+    }
+    
+    async function handleAnalysis() {
+        loadingAnalysis = true;
+        dispatch('analysis');
+        setTimeout(() => loadingAnalysis = false, 2000);
+    }
+    
+    async function handleScore() {
+        loadingScore = true;
+        dispatch('score');
+        setTimeout(() => loadingScore = false, 2000);
     }
 </script>
 
@@ -103,6 +152,12 @@
                     ({myColor === 'black' ? blackPlayer : whitePlayer})
                 </span>
             </div>
+        {:else}
+            <div class="col-span-2 text-center p-2 bg-purple-100 rounded">
+                <span class="font-semibold text-purple-800">
+                    👁️ 관전 모드
+                </span>
+            </div>
         {/if}
     </div>
     
@@ -110,7 +165,7 @@
     <svg
         width={SVG_SIZE}
         height={SVG_SIZE}
-        class="bg-amber-600 rounded shadow-xl cursor-crosshair"
+        class="bg-amber-600 rounded shadow-xl {isMyTurn ? 'cursor-crosshair' : 'cursor-not-allowed'}"
         on:click={handleClick}
         on:mousemove={handleMouseMove}
         on:mouseleave={handleMouseLeave}
@@ -163,8 +218,8 @@
             {/each}
         {/each}
         
-        <!-- 호버 미리보기 -->
-        {#if hoveredPosition && gameStarted}
+        <!-- 호버 미리보기 (내 차례일 때만) -->
+        {#if hoveredPosition && isMyTurn}
             <circle
                 cx={PADDING + hoveredPosition.col * CELL_SIZE}
                 cy={PADDING + hoveredPosition.row * CELL_SIZE}
@@ -175,56 +230,62 @@
             />
         {/if}
         
-        <!-- 추천 착수점 -->
-        {#each recommendedMoves as move}
+        <!-- 추천 착수점 (블루스팟) -->
+        {#if recommendedMove}
             <circle
-                cx={PADDING + move.col * CELL_SIZE}
-                cy={PADDING + move.row * CELL_SIZE}
-                r="8"
+                cx={PADDING + (recommendedMove.y - 1) * CELL_SIZE}
+                cy={PADDING + (recommendedMove.x - 1) * CELL_SIZE}
+                r="10"
                 fill="#3B82F6"
                 opacity="0.6"
-                class="animate-pulse"
+                class="animate-pulse pointer-events-none"
             />
-        {/each}
+        {/if}
     </svg>
     
-    <!-- 컨트롤 버튼 -->
-    <div class="flex flex-wrap gap-3 justify-center">
-        <button
-            class="px-6 py-3 bg-amber-700 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
-                   {isReady && !gameStarted ? 'hover:bg-amber-800' : 'opacity-50 cursor-not-allowed'}"
-            on:click={() => dispatch('newGame')}
-            disabled={!isReady || gameStarted}
-        >
-            게임 시작
-        </button>
-        <button
-            class="px-6 py-3 bg-amber-500 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
-                   {gameStarted ? 'hover:bg-amber-600' : 'opacity-50 cursor-not-allowed'}"
-            on:click={() => dispatch('undo')}
-            disabled={!gameStarted}
-        >
-            무르기
-        </button>
-        <button
-            class="px-6 py-3 bg-blue-500 text-white rounded-lg font-semibold hover:bg-blue-600 transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg"
-            on:click={() => dispatch('recommend')}
-        >
-            착수 추천
-        </button>
-        <button
-            class="px-6 py-3 bg-orange-500 text-white rounded-lg font-semibold hover:bg-orange-600 transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg"
-            on:click={() => dispatch('analysis')}
-        >
-            형세 판단
-        </button>
-        <button
-            class="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
-                   {gameStarted ? 'hover:bg-green-700' : 'opacity-50 cursor-not-allowed'}"
-            on:click={() => dispatch('score')}
-            disabled={!gameStarted}
-        >
-            계가
-        </button>
-    </div>
+    <!-- 컨트롤 버튼 (관전자는 숨김) -->
+    {#if myRole === 'player1' || myRole === 'player2'}
+        <div class="flex flex-wrap gap-3 justify-center">
+            <button
+                class="px-6 py-3 bg-amber-700 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
+                       {isReady && !gameStarted && !loadingStart ? 'hover:bg-amber-800' : 'opacity-50 cursor-not-allowed'}"
+                on:click={handleNewGame}
+                disabled={!isReady || gameStarted || loadingStart}
+            >
+                {loadingStart ? '시작 중...' : '게임 시작'}
+            </button>
+            <button
+                class="px-6 py-3 bg-amber-500 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
+                       {gameStarted && !loadingUndo ? 'hover:bg-amber-600' : 'opacity-50 cursor-not-allowed'}"
+                on:click={handleUndo}
+                disabled={!gameStarted || loadingUndo}
+            >
+                {loadingUndo ? '처리 중...' : '무르기'}
+            </button>
+            <button
+                class="px-6 py-3 bg-blue-500 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
+                       {!loadingRecommend ? 'hover:bg-blue-600' : 'opacity-50 cursor-not-allowed'}"
+                on:click={handleRecommend}
+                disabled={loadingRecommend}
+            >
+                {loadingRecommend ? '분석 중...' : '착수 추천'}
+            </button>
+            <button
+                class="px-6 py-3 bg-orange-500 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
+                       {!loadingAnalysis ? 'hover:bg-orange-600' : 'opacity-50 cursor-not-allowed'}"
+                on:click={handleAnalysis}
+                disabled={loadingAnalysis}
+            >
+                {loadingAnalysis ? '분석 중...' : '형세 판단'}
+            </button>
+            <button
+                class="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold transition-all hover:-translate-y-0.5 shadow-md hover:shadow-lg
+                       {gameStarted && !loadingScore ? 'hover:bg-green-700' : 'opacity-50 cursor-not-allowed'}"
+                on:click={handleScore}
+                disabled={!gameStarted || loadingScore}
+            >
+                {loadingScore ? '계산 중...' : '계가'}
+            </button>
+        </div>
+    {/if}
 </div>

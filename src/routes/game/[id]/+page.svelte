@@ -5,7 +5,10 @@
     import Stomp from 'stompjs';
     import GameBoard from '$lib/components/game/GameBoard.svelte';
     import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
+    import Toast from '$lib/components/Toast.svelte';
     import { API_CONFIG } from '$lib/config';
+    import { GameWebSocketService } from '$lib/services/gameWebSocket';
+    import { gameApi } from '$lib/services/gameApi';
     
     const gameId = $page.params.id;
     
@@ -13,17 +16,17 @@
     $: roomName = $page.url.searchParams.get('roomName') || '대국방';
     
     let chatStompClient;
-    let gameStompClient;
-    let myRole = null; // 'player1', 'player2', 'spectator'
-    let myColor = null; // 'black', 'white', null (관전자)
+    let gameService;
+    let myRole = null;
+    let myColor = null;
     
     // 게임 방 상태
     let player1Name = null;
     let player2Name = null;
     let blackPlayer = null;
     let whitePlayer = null;
-    let isReady = false; // 2명 모였는지
-    let gameStarted = false; // 게임 시작했는지
+    let isReady = false;
+    let gameStarted = false;
     
     // 게임 상태
     let board = Array(19).fill(null).map(() => Array(19).fill(null));
@@ -32,8 +35,25 @@
     let blackCaptures = 0;
     let whiteCaptures = 0;
     
+    // 블루스팟 (추천 착수)
+    let recommendedMove = null;
+    
     // 채팅 상태
     let messages = [];
+    
+    // 토스트 알림
+    let toasts = [];
+    let toastId = 0;
+    
+    function showNotification(message, type = 'info') {
+        const id = toastId++;
+        toasts = [...toasts, { id, message, type }];
+        console.log(`[${type.toUpperCase()}] ${message}`);
+    }
+    
+    function removeToast(id) {
+        toasts = toasts.filter(t => t.id !== id);
+    }
     
     onMount(() => {
         console.log('🎮 게임 시작:', gameId, username);
@@ -54,12 +74,8 @@
         }
         
         // 게임 소켓 종료
-        if (gameStompClient && gameStompClient.connected) {
-            gameStompClient.send('/app/game/leave', {}, JSON.stringify({
-                gameId,
-                username
-            }));
-            gameStompClient.disconnect();
+        if (gameService) {
+            gameService.disconnect();
         }
     });
     
@@ -90,44 +106,21 @@
     
     // 게임 소켓 연결
     function connectGameSocket() {
-        const socket = new SockJS(API_CONFIG.GAME_WS_URL);
-        gameStompClient = Stomp.over(socket);
-        gameStompClient.debug = null;
-        
-        gameStompClient.connect({}, () => {
-            console.log('✅ 게임 소켓 연결 성공');
-            
-            // 게임 상태 구독 (점으로 변경!)
-            gameStompClient.subscribe(`/topic/game.${gameId}`, (message) => {
-                const data = JSON.parse(message.body);
-                handleGameMessage(data);
-            });
-            
-            // 게임 입장 요청
-            gameStompClient.send('/app/game/join', {}, JSON.stringify({
-                gameId,
-                username
-            }));
-        }, (error) => {
-            console.error('❌ 게임 소켓 연결 실패:', error);
+        gameService = new GameWebSocketService(gameId, username, handleGameMessage);
+        gameService.connect().catch(error => {
+            console.error('게임 소켓 연결 실패:', error);
+            showNotification('게임 서버 연결 실패', 'error');
         });
     }
     
     // 게임 메시지 처리
     function handleGameMessage(data) {
-        console.log('🎮 게임 메시지:', data);
+        console.log('🎮 게임 메시지 타입:', data.type, 'from:', data.username);
         
         switch(data.type) {
             case 'JOIN':
-                // 입장 시 게임 상태 + 역할 정보
-                console.log('📦 JOIN 전체 데이터:', JSON.stringify(data, null, 2));
-                console.log('📦 data.data:', data.data);
-                console.log('📦 data.data.role:', data.data?.role);
-                console.log('📦 data.data.player1:', data.data?.player1);
-                console.log('📦 data.data.isReady:', data.data?.isReady);
-                
                 if (data.data) {
-                    // 내 역할 저장 (모든 사용자가 받지만, 자신의 역할만 저장)
+                    // 내 역할 저장
                     if (data.username === username && data.data.role) {
                         myRole = data.data.role;
                         console.log('🎭 내 역할:', myRole);
@@ -141,10 +134,10 @@
                         }
                     }
                     
-                    // 방 상태 업데이트 (모든 사용자)
+                    // 방 상태 업데이트
                     player1Name = data.data.player1;
                     player2Name = data.data.player2;
-                    isReady = data.data.isReady || false;
+                    isReady = data.data.ready || false;
                     gameStarted = data.data.gameStarted || false;
                     
                     console.log('👥 참가자:', player1Name, player2Name, '준비:', isReady);
@@ -161,15 +154,12 @@
                 break;
                 
             case 'START':
-                // 흑/백 랜덤 배정
-                if (data.data && data.data.player1 && data.data.player2) {
-                    const players = [data.data.player1, data.data.player2];
-                    const randomIndex = Math.floor(Math.random() * 2);
+                // 백엔드에서 배정한 흑/백 사용
+                if (data.data) {
+                    blackPlayer = data.data.blackPlayer;
+                    whitePlayer = data.data.whitePlayer;
                     
-                    blackPlayer = players[randomIndex];
-                    whitePlayer = players[1 - randomIndex];
-                    
-                    console.log('🎲 랜덤 배정:', '흑:', blackPlayer, '백:', whitePlayer);
+                    console.log('🎲 서버 배정:', '흑:', blackPlayer, '백:', whitePlayer);
                     
                     // 내 색깔 판단
                     if (username === blackPlayer) {
@@ -189,19 +179,18 @@
                     if (data.data.gameState) {
                         updateGameState(data.data.gameState);
                     }
-                } else {
-                    updateGameState(data.data);
-                    showNotification('게임이 시작되었습니다!', 'success');
                 }
                 break;
                 
             case 'MOVE':
                 updateGameState(data.data);
+                recommendedMove = null; // 착수 후 블루스팟 제거
                 break;
                 
             case 'UNDO':
                 updateGameState(data.data);
                 showNotification('무르기 완료', 'info');
+                recommendedMove = null; // 무르기 후 블루스팟 제거
                 break;
                 
             case 'SCORE':
@@ -218,7 +207,7 @@
                 break;
                 
             case 'ERROR':
-                const errorMsg = data.data?.message || data.data || '오류가 발생했습니다';
+                const errorMsg = data.data?.error || data.data?.message || data.data || '오류가 발생했습니다';
                 showNotification(errorMsg, 'error');
                 break;
                 
@@ -232,15 +221,13 @@
         if (!gameState) return;
         
         board = convertBackendBoardToFrontend(gameState.board);
-        currentTurn = gameState.currentTurn; // 'BLACK' or 'WHITE'
+        currentTurn = gameState.currentTurn;
         moveCount = gameState.moveCount || 0;
         blackCaptures = gameState.blackCaptures || 0;
         whiteCaptures = gameState.whiteCaptures || 0;
     }
     
     // 백엔드 board를 프론트 board로 변환
-    // 백엔드: Stone[][] (BLACK, WHITE, null)
-    // 프론트: string[][] ('black', 'white', null)
     function convertBackendBoardToFrontend(backendBoard) {
         if (!backendBoard) return board;
         
@@ -251,12 +238,6 @@
                 return null;
             })
         );
-    }
-    
-    // 알림 표시
-    function showNotification(message, type = 'info') {
-        console.log(`[${type.toUpperCase()}] ${message}`);
-        alert(message);
     }
     
     // 채팅 메시지 전송
@@ -279,19 +260,16 @@
     function handleMove(event) {
         const { row, col } = event.detail;
         
-        // 게임 시작 체크
         if (!gameStarted) {
             showNotification('게임이 아직 시작되지 않았습니다', 'error');
             return;
         }
         
-        // 관전자 체크
         if (!myColor) {
             showNotification('관전자는 돌을 놓을 수 없습니다', 'error');
             return;
         }
         
-        // 차례 체크
         const isMyTurn = (currentTurn === 'BLACK' && myColor === 'black') ||
                          (currentTurn === 'WHITE' && myColor === 'white');
         
@@ -302,70 +280,46 @@
         }
         
         console.log('🎯 착수 요청:', row, col);
-        
-        if (gameStompClient && gameStompClient.connected) {
-            gameStompClient.send('/app/game/move', {}, JSON.stringify({
-                gameId,
-                username,
-                x: row + 1,
-                y: col + 1
-            }));
-        } else {
-            showNotification('게임 서버에 연결되지 않았습니다', 'error');
-        }
+        gameService.move(row + 1, col + 1);
     }
     
     // 새 게임
     function handleNewGame() {
-        // 2명 모여야 시작 가능
         if (!isReady) {
             showNotification('참가자 2명이 필요합니다', 'error');
             return;
         }
         
-        // 참가자만 시작 가능
         if (myRole !== 'player1' && myRole !== 'player2') {
             showNotification('참가자만 게임을 시작할 수 있습니다', 'error');
             return;
         }
         
-        if (gameStompClient && gameStompClient.connected) {
-            gameStompClient.send('/app/game/start', {}, JSON.stringify({
-                gameId,
-                username
-            }));
-        }
+        gameService.start();
     }
     
     // 무르기
     function handleUndo() {
-        if (gameStompClient && gameStompClient.connected) {
-            gameStompClient.send('/app/game/undo', {}, JSON.stringify({
-                gameId,
-                username  // ✅ username 추가!
-            }));
-        }
+        gameService.undo();
     }
     
-    // 착수 추천 (REST API 사용)
+    // 착수 추천 (REST API - 개인용)
     async function handleRecommend() {
         try {
-            const response = await fetch(`${API_CONFIG.GAME_API_BASE}/katago/bluespots`);
-            const data = await response.json();
+            const data = await gameApi.getBlueSpots(gameId);
             console.log('📍 착수 추천:', data);
-            // TODO: 바둑판에 추천 위치 표시
-            showNotification(`추천 착수: (${data.x}, ${data.y})`, 'info');
+            recommendedMove = { x: data.x, y: data.y }; // 블루스팟 표시
+            showNotification(`추천 착수: (${data.x}, ${data.y})`, 'success');
         } catch (error) {
             console.error('착수 추천 실패:', error);
             showNotification('착수 추천 실패', 'error');
         }
     }
     
-    // 형세 판단 (REST API 사용)
+    // 형세 판단 (REST API - 개인용)
     async function handleAnalysis() {
         try {
-            const response = await fetch(`${API_CONFIG.GAME_API_BASE}/katago/score`);
-            const data = await response.json();
+            const data = await gameApi.getScore(gameId);
             console.log('📊 형세 판단:', data);
             showNotification(`형세 판단: ${data.result}`, 'info');
         } catch (error) {
@@ -374,14 +328,9 @@
         }
     }
     
-    // 계가 (WebSocket - 모두에게 브로드캐스트)
+    // 계가 (WebSocket - 모두에게 공유)
     function handleScore() {
-        if (gameStompClient && gameStompClient.connected) {
-            gameStompClient.send('/app/game/score', {}, JSON.stringify({
-                gameId,
-                username  // ✅ username 추가!
-            }));
-        }
+        gameService.score();
     }
 </script>
 
@@ -400,8 +349,8 @@
                         myRole === 'player2' ? 'bg-gray-100 text-gray-800 border-2 border-gray-400' :
                         'bg-blue-100 text-blue-800'
                     }">
-                        {myRole === 'player1' ? '흑 참가자' : 
-                         myRole === 'player2' ? '백 참가자' : 
+                        {myRole === 'player1' ? '참가자 1' : 
+                         myRole === 'player2' ? '참가자 2' : 
                          '관전자'}
                     </span>
                 {/if}
@@ -420,9 +369,11 @@
                     {whiteCaptures}
                     {isReady}
                     {gameStarted}
+                    {myRole}
                     {myColor}
                     {blackPlayer}
                     {whitePlayer}
+                    {recommendedMove}
                     on:move={handleMove}
                     on:newGame={handleNewGame}
                     on:undo={handleUndo}
@@ -443,3 +394,12 @@
         </div>
     </div>
 </div>
+
+<!-- 토스트 알림 -->
+{#each toasts as toast (toast.id)}
+    <Toast
+        message={toast.message}
+        type={toast.type}
+        onClose={() => removeToast(toast.id)}
+    />
+{/each}
