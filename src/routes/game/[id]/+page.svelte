@@ -1,13 +1,12 @@
 <script>
     import { page } from '$app/stores';
     import { onMount, onDestroy } from 'svelte';
-    import SockJS from 'sockjs-client';
-    import Stomp from 'stompjs';
     import GameBoard from '$lib/components/game/GameBoard.svelte';
     import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
     import Toast from '$lib/components/Toast.svelte';
-    import { API_CONFIG } from '$lib/config';
+    import Modal from '$lib/components/Modal.svelte';
     import { GameWebSocketService } from '$lib/services/gameWebSocket';
+    import { ChatWebSocketService } from '$lib/services/chatWebSocket';
     import { gameApi } from '$lib/services/gameApi';
     
     const gameId = $page.params.id;
@@ -15,7 +14,7 @@
     $: username = $page.url.searchParams.get('username') || 'Guest';
     $: roomName = $page.url.searchParams.get('roomName') || '대국방';
     
-    let chatStompClient;
+    let chatService;
     let gameService;
     let myRole = null;
     let myColor = null;
@@ -45,6 +44,12 @@
     let toasts = [];
     let toastId = 0;
     
+    // 모달 상태
+    let showModal = false;
+    let modalTitle = '';
+    let modalMessage = '';
+    let pendingRequestType = null; // 'START', 'UNDO', 'SCORE'
+    
     function showNotification(message, type = 'info') {
         const id = toastId++;
         toasts = [...toasts, { id, message, type }];
@@ -63,14 +68,8 @@
     
     onDestroy(() => {
         // 채팅 소켓 종료
-        if (chatStompClient && chatStompClient.connected) {
-            chatStompClient.send('/app/chat.sendMessage', {}, JSON.stringify({
-                type: 'LEAVE',
-                roomId: gameId,
-                sender: username,
-                message: ''
-            }));
-            chatStompClient.disconnect();
+        if (chatService) {
+            chatService.disconnect();
         }
         
         // 게임 소켓 종료
@@ -81,27 +80,17 @@
     
     // 채팅 소켓 연결
     function connectChatSocket() {
-        const socket = new SockJS(API_CONFIG.CHAT_WS_URL);
-        chatStompClient = Stomp.over(socket);
-        chatStompClient.debug = null;
-        
-        chatStompClient.connect({}, () => {
-            console.log('✅ 채팅 소켓 연결 성공');
-            
-            chatStompClient.subscribe(`/topic/chat/room/${gameId}`, (message) => {
-                const data = JSON.parse(message.body);
-                messages = [...messages, data];
-            });
-            
-            chatStompClient.send('/app/chat.sendMessage', {}, JSON.stringify({
-                type: 'ENTER',
-                roomId: gameId,
-                sender: username,
-                message: ''
-            }));
-        }, (error) => {
-            console.error('❌ 채팅 소켓 연결 실패:', error);
+        chatService = new ChatWebSocketService(gameId, username, handleChatMessage);
+        chatService.connect().catch(error => {
+            console.error('채팅 소켓 연결 실패:', error);
+            showNotification('채팅 서버 연결 실패', 'error');
         });
+    }
+    
+    // 채팅 메시지 처리
+    function handleChatMessage(data) {
+        console.log('💬 채팅 메시지:', data);
+        messages = [...messages, data];
     }
     
     // 게임 소켓 연결
@@ -193,12 +182,74 @@
                 recommendedMove = null; // 무르기 후 블루스팟 제거
                 break;
                 
-            case 'SCORE':
-                // 계가 결과
+            case 'ANALYSIS':
+                // 형세 판단 - 게임 계속
                 if (data.data && data.data.result) {
-                    showNotification(`계가 결과: ${data.data.result}`, 'success');
-                } else {
-                    showNotification('계가 완료', 'info');
+                    showNotification(`형세 판단: ${data.data.result}`, 'info');
+                }
+                break;
+                
+            case 'SCORE':
+                // 계가 결과 - 게임 종료
+                if (data.data && data.data.result) {
+                    showNotification(`계가 결과: ${data.data.result} - 게임 종료`, 'success');
+                }
+                
+                // 게임 상태 초기화
+                gameStarted = false;
+                myColor = null;
+                blackPlayer = null;
+                whitePlayer = null;
+                board = Array(19).fill(null).map(() => Array(19).fill(null));
+                moveCount = 0;
+                blackCaptures = 0;
+                whiteCaptures = 0;
+                recommendedMove = null;
+                break;
+                
+            
+            case 'REQUEST_START':
+            case 'REQUEST_UNDO':
+            case 'REQUEST_SCORE':
+                // 요청 받음 - 내가 응답자인 경우만 모달 표시
+                if (data.data && data.data.requester !== username) {
+                    const requestTypes = {
+                        'REQUEST_START': 'START',
+                        'REQUEST_UNDO': 'UNDO',
+                        'REQUEST_SCORE': 'SCORE'
+                    };
+                    
+                    pendingRequestType = requestTypes[data.type];
+                    modalTitle = getRequestTitle(pendingRequestType);
+                    modalMessage = data.data.message || `${data.data.requester}님의 요청`;
+                    showModal = true;
+                } else if (data.data && data.data.requester === username) {
+                    showNotification('상대방의 응답을 기다리는 중...', 'info');
+                }
+                break;
+                
+            case 'RESPOND_START':
+            case 'RESPOND_UNDO':
+            case 'RESPOND_SCORE':
+                // 거절 응답만 처리 (수락은 START/UNDO/SCORE로 처리됨)
+                if (data.data && !data.data.accepted) {
+                    showNotification(data.data.message || '상대방이 거절했습니다', 'warning');
+                }
+                break;
+                
+            case 'TIMEOUT_REQUEST':
+                // 요청 타임아웃
+                if (data.data) {
+                    showNotification(data.data.message || '요청 시간이 초과되었습니다', 'warning');
+                }
+                showModal = false;
+                pendingRequestType = null;
+                break;
+                
+            case 'DISCONNECT':
+                // 연결 끊김
+                if (data.data) {
+                    showNotification(data.data.message || `${data.data.username}님의 연결이 끊어졌습니다`, 'warning');
                 }
                 break;
                 
@@ -214,6 +265,47 @@
             default:
                 console.log('알 수 없는 메시지:', data);
         }
+    }
+    
+    function getRequestTitle(type) {
+        const titles = {
+            'START': '게임 시작 요청',
+            'UNDO': '무르기 요청',
+            'SCORE': '계가 요청'
+        };
+        return titles[type] || '요청';
+    }
+    
+    // 모달 수락
+    function handleModalAccept() {
+        console.log('✅ 요청 수락:', pendingRequestType);
+        
+        if (pendingRequestType === 'START') {
+            gameService.respondStart(true);
+        } else if (pendingRequestType === 'UNDO') {
+            gameService.respondUndo(true);
+        } else if (pendingRequestType === 'SCORE') {
+            gameService.respondScore(true);
+        }
+        
+        showModal = false;
+        pendingRequestType = null;
+    }
+    
+    // 모달 거절
+    function handleModalReject() {
+        console.log('❌ 요청 거절:', pendingRequestType);
+        
+        if (pendingRequestType === 'START') {
+            gameService.respondStart(false);
+        } else if (pendingRequestType === 'UNDO') {
+            gameService.respondUndo(false);
+        } else if (pendingRequestType === 'SCORE') {
+            gameService.respondScore(false);
+        }
+        
+        showModal = false;
+        pendingRequestType = null;
     }
     
     // 게임 상태 업데이트
@@ -243,17 +335,7 @@
     // 채팅 메시지 전송
     function handleSendChat(event) {
         const { message } = event.detail;
-        
-        if (chatStompClient && chatStompClient.connected) {
-            chatStompClient.send('/app/chat.sendMessage', {}, JSON.stringify({
-                type: 'TALK',
-                roomId: gameId,
-                sender: username,
-                message: message
-            }));
-        } else {
-            showNotification('채팅 서버에 연결되지 않았습니다', 'error');
-        }
+        chatService.sendMessage(message);
     }
     
     // 착수
@@ -283,8 +365,8 @@
         gameService.move(row + 1, col + 1);
     }
     
-    // 새 게임
-    function handleNewGame() {
+    // 게임 시작 요청
+    function handleRequestStart() {
         if (!isReady) {
             showNotification('참가자 2명이 필요합니다', 'error');
             return;
@@ -295,12 +377,20 @@
             return;
         }
         
-        gameService.start();
+        console.log('📢 게임 시작 요청 전송');
+        gameService.requestStart();
     }
     
-    // 무르기
-    function handleUndo() {
-        gameService.undo();
+    // 무르기 요청
+    function handleRequestUndo() {
+        console.log('📢 무르기 요청 전송');
+        gameService.requestUndo();
+    }
+    
+    // 계가 요청
+    function handleRequestScore() {
+        console.log('📢 계가 요청 전송');
+        gameService.requestScore();
     }
     
     // 착수 추천 (REST API - 개인용)
@@ -316,35 +406,24 @@
         }
     }
     
-    // 형세 판단 (REST API - 개인용)
-    async function handleAnalysis() {
-        try {
-            const data = await gameApi.getScore(gameId);
-            console.log('📊 형세 판단:', data);
-            showNotification(`형세 판단: ${data.result}`, 'info');
-        } catch (error) {
-            console.error('형세 판단 실패:', error);
-            showNotification('형세 판단 실패', 'error');
-        }
-    }
-    
-    // 계가 (WebSocket - 모두에게 공유)
-    function handleScore() {
-        gameService.score();
+    // 형세 판단 (WebSocket - 모두에게 공유)
+    function handleAnalysis() {
+        console.log('📊 형세 판단 요청');
+        gameService.analysis();
     }
 </script>
 
-<div class="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-6">
-    <div class="max-w-7xl mx-auto">
-        <!-- 헤더 -->
-        <div class="text-center mb-8">
-            <h1 class="text-5xl font-bold text-amber-900 mb-2 drop-shadow-md">
+<div class="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4">
+    <div class="max-w-[1880px] mx-auto h-[calc(100vh-32px)] flex flex-col">
+        <!-- 헤더 (축소) -->
+        <div class="text-center mb-4">
+            <h1 class="text-4xl font-bold text-amber-900 mb-1 drop-shadow-md">
                 WooTeGo
             </h1>
-            <div class="flex items-center justify-center gap-4">
-                <p class="text-amber-700 text-lg">{roomName} - {username}님</p>
+            <div class="flex items-center justify-center gap-3">
+                <p class="text-amber-700 text-base">{roomName} - {username}님</p>
                 {#if myRole}
-                    <span class="px-4 py-1 rounded-full text-sm font-semibold {
+                    <span class="px-3 py-1 rounded-full text-xs font-semibold {
                         myRole === 'player1' ? 'bg-gray-800 text-white' :
                         myRole === 'player2' ? 'bg-gray-100 text-gray-800 border-2 border-gray-400' :
                         'bg-blue-100 text-blue-800'
@@ -358,9 +437,9 @@
         </div>
         
         <!-- 게임 + 채팅 레이아웃 -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- 바둑판 영역 -->
-            <div class="lg:col-span-2 bg-white rounded-2xl shadow-2xl p-8">
+        <div class="flex-1 grid grid-cols-3 gap-4 min-h-0">
+            <!-- 바둑판 영역 (2/3) -->
+            <div class="col-span-2 bg-white rounded-xl shadow-2xl p-4 flex flex-col min-h-0">
                 <GameBoard
                     {board}
                     currentTurn={currentTurn === 'BLACK' ? 'black' : 'white'}
@@ -375,16 +454,16 @@
                     {whitePlayer}
                     {recommendedMove}
                     on:move={handleMove}
-                    on:newGame={handleNewGame}
-                    on:undo={handleUndo}
+                    on:requestStart={handleRequestStart}
+                    on:requestUndo={handleRequestUndo}
+                    on:requestScore={handleRequestScore}
                     on:recommend={handleRecommend}
                     on:analysis={handleAnalysis}
-                    on:score={handleScore}
                 />
             </div>
             
-            <!-- 채팅 영역 -->
-            <div class="lg:col-span-1 h-[800px]">
+            <!-- 채팅 영역 (1/3) -->
+            <div class="col-span-1 min-h-0">
                 <ChatPanel
                     {messages}
                     {username}
@@ -394,6 +473,15 @@
         </div>
     </div>
 </div>
+
+<!-- 요청 모달 -->
+<Modal
+    show={showModal}
+    title={modalTitle}
+    message={modalMessage}
+    on:accept={handleModalAccept}
+    on:reject={handleModalReject}
+/>
 
 <!-- 토스트 알림 -->
 {#each toasts as toast (toast.id)}

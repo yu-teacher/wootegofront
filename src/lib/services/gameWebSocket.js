@@ -27,11 +27,15 @@ export class GameWebSocketService {
             this.stompClient.connect({}, () => {
                 console.log('✅ 게임 WebSocket 연결 성공');
                 
-                // 게임방 구독
-                this.stompClient.subscribe(`/topic/game.${this.gameId}`, (message) => {
-                    const data = JSON.parse(message.body);
-                    this.onMessage(data);
-                });
+                // 게임방 구독 (username 헤더 전달)
+                this.stompClient.subscribe(
+                    `/topic/game.${this.gameId}`, 
+                    (message) => {
+                        const data = JSON.parse(message.body);
+                        this.onMessage(data);
+                    },
+                    { username: this.username } // ✅ 헤더 추가
+                );
                 
                 // 자동 입장
                 this.join();
@@ -54,7 +58,7 @@ export class GameWebSocketService {
     }
     
     /**
-     * 게임 시작
+     * 게임 시작 (바로 시작 - 하위 호환)
      */
     start() {
         this.send('/app/game/start', {
@@ -78,7 +82,7 @@ export class GameWebSocketService {
     }
     
     /**
-     * 무르기
+     * 무르기 (바로 무르기 - 하위 호환)
      */
     undo() {
         this.send('/app/game/undo', {
@@ -88,12 +92,90 @@ export class GameWebSocketService {
     }
     
     /**
-     * 계가 (모두에게 브로드캐스트)
+     * 형세 판단 (게임 계속)
+     */
+    analysis() {
+        this.send('/app/game/analysis', {
+            gameId: this.gameId,
+            username: this.username
+        });
+    }
+    
+    /**
+     * 계가 (게임 종료)
      */
     score() {
         this.send('/app/game/score', {
             gameId: this.gameId,
             username: this.username
+        });
+    }
+    
+    // ==================== 요청/응답 시스템 ====================
+    
+    /**
+     * 게임 시작 요청
+     */
+    requestStart() {
+        this.send('/app/game/request/start', {
+            gameId: this.gameId,
+            username: this.username
+        });
+    }
+    
+    /**
+     * 무르기 요청
+     */
+    requestUndo() {
+        this.send('/app/game/request/undo', {
+            gameId: this.gameId,
+            username: this.username
+        });
+    }
+    
+    /**
+     * 계가 요청
+     */
+    requestScore() {
+        this.send('/app/game/request/score', {
+            gameId: this.gameId,
+            username: this.username
+        });
+    }
+    
+    /**
+     * 게임 시작 응답
+     * @param {boolean} accepted - 수락 여부
+     */
+    respondStart(accepted) {
+        this.send('/app/game/respond/start', {
+            gameId: this.gameId,
+            username: this.username,
+            accepted
+        });
+    }
+    
+    /**
+     * 무르기 응답
+     * @param {boolean} accepted - 수락 여부
+     */
+    respondUndo(accepted) {
+        this.send('/app/game/respond/undo', {
+            gameId: this.gameId,
+            username: this.username,
+            accepted
+        });
+    }
+    
+    /**
+     * 계가 응답
+     * @param {boolean} accepted - 수락 여부
+     */
+    respondScore(accepted) {
+        this.send('/app/game/respond/score', {
+            gameId: this.gameId,
+            username: this.username,
+            accepted
         });
     }
     
