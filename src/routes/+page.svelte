@@ -12,15 +12,11 @@
 	let lobbyService;
 
 	onMount(() => {
-		// 초기 방 목록 로드
 		loadRooms();
-		
-		// WebSocket 연결
 		connectLobby();
 	});
 
 	onDestroy(() => {
-		// WebSocket 종료
 		if (lobbyService) {
 			lobbyService.disconnect();
 		}
@@ -42,17 +38,12 @@
 	}
 
 	function handleLobbyUpdate(data) {
-		console.log('📡 로비 업데이트:', data);
-
 		if (Array.isArray(data)) {
-			// 초기 방 목록
 			rooms = data;
 		} else if (data.type === 'CREATED') {
-			// 방 생성
 			const newRoom = data.data;
 			rooms = [...rooms, newRoom];
 		} else if (data.type === 'DELETED') {
-			// 방 삭제
 			const deletedRoomId = data.data;
 			rooms = rooms.filter(r => r.roomId !== deletedRoomId);
 		}
@@ -67,7 +58,6 @@
 		try {
 			const newRoom = await chatApi.createRoom(roomName);
 			roomName = '';
-			// WebSocket으로 자동 업데이트됨 (loadRooms 호출 불필요)
 			enterRoom(newRoom);
 		} catch (error) {
 			console.error('방 생성 실패:', error);
